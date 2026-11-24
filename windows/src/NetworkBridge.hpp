@@ -225,7 +225,7 @@ private:
                 WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
             if (request) {
                 WinHttpAddRequestHeaders(request,
-                    L"Content-Type: application/json\r\n", (DWORD)-1);
+                    L"Content-Type: application/json\r\n", -1, WINHTTP_ADDREQ_FLAG_ADD);
                 auto wbody = utf8ToWide_(jsonBody);
                 DWORD bodyLen = (DWORD)jsonBody.size();
                 WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
