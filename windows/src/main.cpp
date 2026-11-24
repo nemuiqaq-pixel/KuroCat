@@ -1027,8 +1027,8 @@ void showContextMenu(AppState& app, POINT screenPt) {
         // 提示
         CreateWindowExW(0, L"STATIC",
             L"\U0001F4A1 免费后端: Cloudflare Worker (Dashboard 粘贴代码, 0$)",
-            WS_CHILD | WS_VISIBLE | SS_LEFT | SS_WORDBREAK,
-            20, 150, 420, 40, dlg, nullptr, hInst, nullptr);
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            20, 150, 420, 20, dlg, nullptr, hInst, nullptr);
 
         // 按钮
         CreateWindowExW(0, L"BUTTON", L"保存",
