@@ -65,12 +65,9 @@ public:
 
     void disconnect() {
         running_ = false;
-        // 发个 close frame
         {
             std::lock_guard<std::mutex> lk(mtx_);
             if (socket_) {
-                uint8_t closeFrame[] = {0x88, 0x00};
-                sendRaw_(closeFrame, sizeof(closeFrame));
                 WinHttpCloseHandle(socket_);
                 socket_ = nullptr;
             }
@@ -159,6 +156,22 @@ public:
         return cfg;
     }
 
+    // ── 供外部调用的 UTF 转换（main.cpp 命令行参数解析需要）──
+    static std::wstring utf8ToWide_(const std::string& s) {
+        if (s.empty()) return L"";
+        int needed = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+        std::wstring out(needed, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), out.data(), needed);
+        return out;
+    }
+    static std::string wideToUtf8_(const std::wstring& s) {
+        if (s.empty()) return "";
+        int needed = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0, nullptr, nullptr);
+        std::string out(needed, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(), out.data(), needed, nullptr, nullptr);
+        return out;
+    }
+
 private:
     std::mutex mtx_;
     std::mutex dataMtx_;
@@ -211,8 +224,8 @@ private:
                 utf8ToWide_(path).c_str(), nullptr, WINHTTP_NO_REFERER,
                 WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
             if (request) {
-                WinHttpSetRequestHeaders(request,
-                    L"Content-Type: application/json\r\n", 27);
+                WinHttpAddRequestHeaders(request,
+                    L"Content-Type: application/json\r\n", (DWORD)-1);
                 auto wbody = utf8ToWide_(jsonBody);
                 DWORD bodyLen = (DWORD)jsonBody.size();
                 WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
@@ -255,10 +268,7 @@ private:
             if (request && WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                                               WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
                         && WinHttpReceiveResponse(request, nullptr)) {
-                DWORD size = 0;
-                WinHttpQueryHeaders(request, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
-                                    WINHTTP_HEADER_NAME_BY_INDEX, &size, WINHTTP_NO_HEADER_INDEX);
-                if (!size) size = 4096;
+                DWORD size = 8192;
                 std::vector<char> buf(size + 1);
                 DWORD got = 0;
                 if (WinHttpReadData(request, buf.data(), size, &got)) {
@@ -334,20 +344,6 @@ private:
             if (isalnum(c) || c == '-' || c == '_') out += c;
             else { char buf[4]; sprintf(buf, "%%%02X", c); out += buf; }
         }
-        return out;
-    }
-    static std::wstring utf8ToWide_(const std::string& s) {
-        if (s.empty()) return L"";
-        int needed = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
-        std::wstring out(needed, L'\0');
-        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), out.data(), needed);
-        return out;
-    }
-    static std::string wideToUtf8_(const std::wstring& s) {
-        if (s.empty()) return "";
-        int needed = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0, nullptr, nullptr);
-        std::string out(needed, '\0');
-        WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(), out.data(), needed, nullptr, nullptr);
         return out;
     }
 };
