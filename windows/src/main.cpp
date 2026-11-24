@@ -1099,26 +1099,144 @@ void showContextMenu(AppState& app, POINT screenPt) {
             break;
         }
         case CMD_TEAM_OPEN_SETTINGS: {
-            // 显示当前配置状态 + 手动指引
+            // ── 原生 Windows 设置对话框（3 个输入框 + 保存/取消）──
             auto netCfg = NetworkBridge::loadFromIni();
-            std::wstring info;
-            if (netCfg.serverUrl.empty()) {
-                info = L"组队模式还没配置。\n\n";
-            } else {
-                info = L"当前组队配置：\n\n"
-                       L"  服务器:  " + utf8ToWide(netCfg.serverUrl) + L"\n"
-                       L"  房间号:  " + utf8ToWide(netCfg.room) + L"\n"
-                       L"  昵称:    " + utf8ToWide(netCfg.username) + L"\n\n";
+            std::string cfg_server = netCfg.serverUrl;
+            std::string cfg_room   = netCfg.room;
+            std::string cfg_name   = netCfg.username;
+
+            // 临时存储：GetWindowText 会写进这里
+            wchar_t bufServer[256] = {};
+            wchar_t bufRoom[64]    = {};
+            wchar_t bufName[64]    = {};
+            wcscpy_s(bufServer, utf8ToWide(cfg_server).c_str());
+            wcscpy_s(bufRoom,   utf8ToWide(cfg_room).c_str());
+            wcscpy_s(bufName,   utf8ToWide(cfg_name).c_str());
+
+            struct Ctx { HWND edit[3]; wchar_t *buf[3]; };
+            Ctx ctx = {};
+            // 给临时缓冲一个可寻址存储
+            wchar_t *store[3] = { bufServer, bufRoom, bufName };
+            ctx.buf[0] = bufServer; ctx.buf[1] = bufRoom; ctx.buf[2] = bufName;
+
+            // 预注册窗口类（第一次）
+            static bool s_registered = false;
+            if (!s_registered) {
+                WNDCLASSEXW wc = { sizeof(wc) };
+                wc.lpfnWndProc  = DefDlgProcW;  // 用默认对话框过程
+                wc.hInstance    = (HINSTANCE)GetWindowLongPtrW(app.hwnd, GWLP_HINSTANCE);
+                wc.lpszClassName = L"KuroCatTeamSettings";
+                RegisterClassExW(&wc);
+                s_registered = true;
             }
-            info += L"要修改这些值：\n"
-                    L"  1. Win+R → 输入 regedit → 回车\n"
-                    L"  2. 打开 HKCU\\Software\\KuroCat\n"
-                    L"  3. 修改 / 新建这 3 个字符串值：\n"
-                    L"     FriendServer  FriendRoom  FriendName\n\n"
-                    L"或者命令行启动：\n"
-                    L"  KuroCat.exe --server=wss://... --room=office --name=Renogy\n\n"
-                    L"后端免费部署：Cloudflare Worker（0 美元）";
-            MessageBoxW(app.menuOwnerHwnd, info.c_str(), L"KuroCat 组队设置", MB_OK | MB_ICONINFORMATION);
+            HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(app.hwnd, GWLP_HINSTANCE);
+
+            // 主对话框
+            HWND dlg = CreateWindowExW(0, L"KuroCatTeamSettings",
+                L"\U0001F431 KuroCat 组队设置（和朋友比打字）",
+                WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER,
+                CW_USEDEFAULT, CW_USEDEFAULT, 440, 300,
+                app.menuOwnerHwnd, nullptr, hInst, nullptr);
+
+            // 居中显示
+            RECT rc; GetWindowRect(dlg, &rc);
+            int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+            int dx = (sw - (rc.right - rc.left)) / 2 - rc.left;
+            int dy = (sh - (rc.bottom - rc.top)) / 2 - rc.top;
+            SetWindowPos(dlg, nullptr, rc.left + dx, rc.top + dy, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+
+            // 3 行布局：标签(80) + 编辑框(300)，Y 偏移 25/75/125
+            struct Row { int y; const wchar_t* label; wchar_t* val; };
+            Row rows[] = {
+                { 15, L"服务器地址:", bufServer },
+                { 65, L"房间号:",     bufRoom },
+                { 115,L"你的昵称:",   bufName },
+            };
+            for (int i = 0; i < 3; i++) {
+                CreateWindowExW(0, L"STATIC", rows[i].label,
+                    WS_CHILD | WS_VISIBLE | SS_LEFT,
+                    20, rows[i].y, 100, 20, dlg, nullptr, hInst, nullptr);
+                ctx.edit[i] = CreateWindowExW(0, L"EDIT", rows[i].val,
+                    WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                    120, rows[i].y - 2, 300, 22, dlg, nullptr, hInst, nullptr);
+            }
+
+            // 说明文字
+            CreateWindowExW(0, L"STATIC",
+                L"\U0001F4A1 后端免费部署: Cloudflare Dashboard 粘贴代码即可（0 美元）",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                20, 165, 400, 30, dlg, nullptr, hInst, nullptr);
+
+            // 保存 / 取消 按钮
+            HWND btnSave = CreateWindowExW(0, L"BUTTON", L"保存 (S)",
+                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                170, 215, 100, 32, dlg, (HMENU)1001, hInst, nullptr);
+            HWND btnCancel = CreateWindowExW(0, L"BUTTON", L"取消",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                280, 215, 100, 32, dlg, (HMENU)IDCANCEL, hInst, nullptr);
+
+            ShowWindow(dlg, SW_SHOW);
+            UpdateWindow(dlg);
+
+            // 简单的模态消息循环，处理按钮点击
+            MSG msg = {};
+            bool done = false;
+            while (!done && GetMessageW(&msg, nullptr, 0, 0)) {
+                if (IsDialogMessageW(dlg, &msg)) continue;
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+
+                // WM_COMMAND: 保存=1001, 取消=IDCANCEL
+                if (msg.message == WM_COMMAND) {
+                    if (LOWORD(msg.wParam) == 1001) {
+                        // 保存
+                        NetworkBridge::Config nc;
+                        GetWindowTextW(ctx.edit[0], bufServer, 255);
+                        GetWindowTextW(ctx.edit[1], bufRoom,   63);
+                        GetWindowTextW(ctx.edit[2], bufName,   63);
+                        nc.serverUrl = NetworkBridge::wideToUtf8_(bufServer);
+                        nc.room      = NetworkBridge::wideToUtf8_(bufRoom);
+                        nc.username  = NetworkBridge::wideToUtf8_(bufName);
+                        // 规范化: 去尾部空格, wss → https
+                        auto trim = [](std::string& s) {
+                            while (!s.empty() && (s.back()==' '||s.back()=='\t')) s.pop_back();
+                        };
+                        trim(nc.serverUrl); trim(nc.room); trim(nc.username);
+                        if (nc.serverUrl.rfind("wss://",0)==0) nc.serverUrl.replace(0,6,"https://");
+                        if (nc.serverUrl.rfind("ws://",0)==0)  nc.serverUrl.replace(0,5,"http://");
+
+                        if (nc.serverUrl.empty() || nc.room.empty() || nc.username.empty()) {
+                            MessageBoxW(dlg,
+                                L"请填全三项：服务器地址、房间号、昵称。\n\n"
+                                L"服务器地址形如：https://friend-kpm-xxxx.workers.dev",
+                                L"KuroCat 组队设置", MB_OK | MB_ICONWARNING);
+                            continue;
+                        }
+                        NetworkBridge::saveToIni("", nc);
+                        cfg_server = nc.serverUrl; cfg_room = nc.room; cfg_name = nc.username;
+                        DestroyWindow(dlg);
+                        done = true;
+                    } else if (LOWORD(msg.wParam) == IDCANCEL) {
+                        DestroyWindow(dlg); done = true;
+                    }
+                }
+                if (msg.message == WM_CLOSE && msg.hwnd == dlg) {
+                    DestroyWindow(dlg); done = true;
+                }
+            }
+
+            // 如果保存了 → 自动开启组队
+            if (!cfg_server.empty() && !done) {}  // no-op
+
+            // 重新读取，若保存了且之前已勾选组队模式 → 重连
+            auto freshCfg = NetworkBridge::loadFromIni();
+            if (app.teamEnabled) {
+                app.net.disconnect();
+                if (!freshCfg.serverUrl.empty() && !freshCfg.username.empty() && !freshCfg.room.empty()) {
+                    app.net.connect(freshCfg);
+                    app.nextNetReportTime = nowSeconds();
+                }
+            }
             break;
         }
         case CMD_QUIT:
