@@ -972,15 +972,16 @@ void showContextMenu(AppState& app, POINT screenPt) {
     PostMessageW(menuOwner, WM_NULL, 0, 0);
     DestroyMenu(menu);
 
-    // ── 组队设置对话框（两个 case 共用）──
+    // ── 组队设置对话框 ──
     auto showTeamSettingsDialog = [&app]() -> bool {
         auto netCfg = NetworkBridge::loadFromIni();
-        wchar_t bufServer[256] = {};
-        wchar_t bufRoom[64]    = {};
-        wchar_t bufName[64]    = {};
-        wcscpy_s(bufServer, utf8ToWide(netCfg.serverUrl).c_str());
-        wcscpy_s(bufRoom,   utf8ToWide(netCfg.room).c_str());
-        wcscpy_s(bufName,   utf8ToWide(netCfg.username).c_str());
+
+        static wchar_t s_bufServer[256] = {};
+        static wchar_t s_bufRoom[64]    = {};
+        static wchar_t s_bufName[64]    = {};
+        wcscpy_s(s_bufServer, utf8ToWide(netCfg.serverUrl).c_str());
+        wcscpy_s(s_bufRoom,   utf8ToWide(netCfg.room).c_str());
+        wcscpy_s(s_bufName,   utf8ToWide(netCfg.username).c_str());
 
         static bool s_registered = false;
         if (!s_registered) {
@@ -988,95 +989,92 @@ void showContextMenu(AppState& app, POINT screenPt) {
             wc.lpfnWndProc   = DefDlgProcW;
             wc.hInstance     = (HINSTANCE)GetWindowLongPtrW(app.hwnd, GWLP_HINSTANCE);
             wc.lpszClassName = L"KuroCatTeamSettings";
+            wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
             RegisterClassExW(&wc);
             s_registered = true;
         }
         HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(app.hwnd, GWLP_HINSTANCE);
 
-        // 主窗口
         HWND dlg = CreateWindowExW(0, L"KuroCatTeamSettings",
             L"\U0001F431 KuroCat 组队设置",
-            WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER,
-            CW_USEDEFAULT, CW_USEDEFAULT, 460, 320,
+            WS_POPUP | WS_CAPTION | WS_SYSMENU,
+            CW_USEDEFAULT, CW_USEDEFAULT, 460, 290,
             app.menuOwnerHwnd, nullptr, hInst, nullptr);
 
-        // 居中
         RECT rc; GetWindowRect(dlg, &rc);
         int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
         SetWindowPos(dlg, nullptr,
             (sw - (rc.right-rc.left))/2 - rc.left,
             (sh - (rc.bottom-rc.top))/2 - rc.top, 0, 0, SWP_NOSIZE|SWP_NOZORDER);
 
-        // 3 个编辑框
-        HWND edits[3] = {};
         struct Row { int y; const wchar_t* label; wchar_t* val; };
         Row rows[] = {
-            { 15, L"服务器地址:", bufServer },
-            { 60, L"房间号:",     bufRoom   },
-            {105, L"你的昵称:",   bufName   },
+            { 12, L"服务器地址:", s_bufServer },
+            { 56, L"房间号:",     s_bufRoom   },
+            {100, L"你的昵称:",   s_bufName   },
         };
+        HWND edits[3] = {};
         for (int i = 0; i < 3; i++) {
             CreateWindowExW(0, L"STATIC", rows[i].label,
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                20, rows[i].y, 100, 20, dlg, nullptr, hInst, nullptr);
+                16, rows[i].y, 90, 20, dlg, nullptr, hInst, nullptr);
             edits[i] = CreateWindowExW(0, L"EDIT", rows[i].val,
                 WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                120, rows[i].y - 2, 310, 22, dlg, nullptr, hInst, nullptr);
+                112, rows[i].y - 2, 320, 22, dlg, nullptr, hInst, nullptr);
         }
-
-        // 提示
         CreateWindowExW(0, L"STATIC",
             L"\U0001F4A1 免费后端: Cloudflare Worker (Dashboard 粘贴代码, 0$)",
             WS_CHILD | WS_VISIBLE | SS_LEFT,
-            20, 150, 420, 20, dlg, nullptr, hInst, nullptr);
-
-        // 按钮
+            16, 145, 420, 18, dlg, nullptr, hInst, nullptr);
         CreateWindowExW(0, L"BUTTON", L"保存",
-            WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON, 180, 220, 100, 32, dlg, (HMENU)1001, hInst, nullptr);
+            WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON, 175, 200, 110, 30,
+            dlg, (HMENU)1001, hInst, nullptr);
         CreateWindowExW(0, L"BUTTON", L"取消",
-            WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,    290, 220, 100, 32, dlg, (HMENU)IDCANCEL, hInst, nullptr);
+            WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, 295, 200, 110, 30,
+            dlg, (HMENU)IDCANCEL, hInst, nullptr);
 
-        ShowWindow(dlg, SW_SHOW); UpdateWindow(dlg);
+        ShowWindow(dlg, SW_SHOW);
+        SetForegroundWindow(dlg);
+        SetFocus(edits[0]);
 
-        // 模态循环
-        MSG msg = {}; bool saved = false;
-        while (GetMessageW(&msg, nullptr, 0, 0)) {
-            if (IsDialogMessageW(dlg, &msg)) continue;
-            TranslateMessage(&msg); DispatchMessageW(&msg);
+        MSG msg = {};
+        bool done = false, saved = false;
+        while (!done) {
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                if (msg.message == WM_QUIT) { PostQuitMessage((int)msg.wParam); DestroyWindow(dlg); return saved; }
+                // IsDialogMessageW 处理键盘导航 + 转发表单消息
+                if (IsDialogMessageW(dlg, &msg)) continue;
+                TranslateMessage(&msg); DispatchMessageW(&msg);
 
-            if (msg.message == WM_COMMAND) {
-                if (LOWORD(msg.wParam) == 1001) {
-                    // 保存
-                    GetWindowTextW(edits[0], bufServer, 255);
-                    GetWindowTextW(edits[1], bufRoom,   63);
-                    GetWindowTextW(edits[2], bufName,   63);
-                    NetworkBridge::Config nc;
-                    nc.serverUrl = NetworkBridge::wideToUtf8_(bufServer);
-                    nc.room      = NetworkBridge::wideToUtf8_(bufRoom);
-                    nc.username  = NetworkBridge::wideToUtf8_(bufName);
-                    // trim
-                    for (auto* s : {&nc.serverUrl, &nc.room, &nc.username}) {
-                        while (!s->empty() && (s->back()==' '||s->back()=='\t')) s->pop_back();
+                if (msg.hwnd == dlg && msg.message == WM_COMMAND) {
+                    if (LOWORD(msg.wParam) == 1001 || LOWORD(msg.wParam) == IDOK) {
+                        GetWindowTextW(edits[0], s_bufServer, 255);
+                        GetWindowTextW(edits[1], s_bufRoom,   63);
+                        GetWindowTextW(edits[2], s_bufName,   63);
+                        NetworkBridge::Config nc;
+                        nc.serverUrl = NetworkBridge::wideToUtf8_(s_bufServer);
+                        nc.room      = NetworkBridge::wideToUtf8_(s_bufRoom);
+                        nc.username  = NetworkBridge::wideToUtf8_(s_bufName);
+                        for (auto* s : {&nc.serverUrl, &nc.room, &nc.username})
+                            while (!s->empty() && (s->back()==' '||s->back()=='\t')) s->pop_back();
+                        if (nc.serverUrl.rfind("wss://",0)==0) nc.serverUrl.replace(0,6,"https://");
+                        if (nc.serverUrl.rfind("ws://",0)==0)  nc.serverUrl.replace(0,5,"http://");
+                        if (nc.serverUrl.empty() || nc.room.empty() || nc.username.empty()) {
+                            MessageBoxW(dlg,
+                                L"请填全三项：服务器地址、房间号、昵称。\n\n"
+                                L"服务器地址形如：https://friend-kpm-xxxx.workers.dev",
+                                L"KuroCat 组队设置", MB_OK | MB_ICONWARNING);
+                            continue;
+                        }
+                        NetworkBridge::saveToIni("", nc);
+                        saved = true; DestroyWindow(dlg); done = true;
+                    } else if (LOWORD(msg.wParam) == IDCANCEL) {
+                        DestroyWindow(dlg); done = true;
                     }
-                    if (nc.serverUrl.rfind("wss://",0)==0) nc.serverUrl.replace(0,6,"https://");
-                    if (nc.serverUrl.rfind("ws://",0)==0)  nc.serverUrl.replace(0,5,"http://");
-
-                    if (nc.serverUrl.empty() || nc.room.empty() || nc.username.empty()) {
-                        MessageBoxW(dlg,
-                            L"请填全三项：服务器地址、房间号、昵称。\n\n"
-                            L"服务器地址形如：\n"
-                            L"https://friend-kpm-xxxx.workers.dev",
-                            L"KuroCat 组队设置", MB_OK | MB_ICONWARNING);
-                        continue;
-                    }
-                    NetworkBridge::saveToIni("", nc);
-                    saved = true;
-                    DestroyWindow(dlg);
-                    break;
                 }
-                if (LOWORD(msg.wParam) == IDCANCEL) { DestroyWindow(dlg); break; }
+                if (msg.message == WM_CLOSE && msg.hwnd == dlg) { DestroyWindow(dlg); done = true; }
             }
-            if (msg.message == WM_CLOSE && msg.hwnd == dlg) { DestroyWindow(dlg); break; }
+            if (!done) Sleep(5);
         }
         return saved;
     };
