@@ -117,6 +117,7 @@ struct AppState {
     NetworkBridge net;
     double nextNetReportTime = 0.0;    // 下次上报 KPM 的时间
     bool teamEnabled = false;          // 组队模式开关
+    HWND teamSettingsDlg = nullptr;    // 组队设置对话框（非模态）
 
     bool isVisible = true;
     bool isDragging = false;
@@ -972,111 +973,156 @@ void showContextMenu(AppState& app, POINT screenPt) {
     PostMessageW(menuOwner, WM_NULL, 0, 0);
     DestroyMenu(menu);
 
-    // ── 组队设置对话框 ──
-    auto showTeamSettingsDialog = [&app]() -> bool {
-        auto netCfg = NetworkBridge::loadFromIni();
+    // ── 组队设置对话框（非模态 + 自定义 WndProc）──
+    // 核心思路：对话框窗口进程自己处理所有消息，不需要模态循环。
+    // KuroCat 主循环里的 IsDialogMessageW 会帮忙处理 Tab/Enter/Esc。
+    // 全局缓冲用于跨消息传递：WM_INITDIALOG 读、WM_COMMAND 写。
+    static wchar_t g_teamBufServer[256] = {};
+    static wchar_t g_teamBufRoom[64]    = {};
+    static wchar_t g_teamBufName[64]    = {};
 
-        static wchar_t s_bufServer[256] = {};
-        static wchar_t s_bufRoom[64]    = {};
-        static wchar_t s_bufName[64]    = {};
-        wcscpy_s(s_bufServer, utf8ToWide(netCfg.serverUrl).c_str());
-        wcscpy_s(s_bufRoom,   utf8ToWide(netCfg.room).c_str());
-        wcscpy_s(s_bufName,   utf8ToWide(netCfg.username).c_str());
+    static LRESULT CALLBACK TeamSettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+        // 存一个指针让控件创建时能访问 AppState（通过 GWLP_USERDATA 存 AppState*）
+        AppState* app = (AppState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+        switch (msg) {
+            case WM_CREATE: {
+                // 保存 AppState 指针
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)lp);
+                break;
+            }
+            case WM_INITDIALOG:
+            case WM_PAINT:
+                break;
+            case WM_COMMAND: {
+                // 子控件 ID：100=服务器, 101=房间, 102=昵称, 1001=保存, IDCANCEL=取消
+                if (LOWORD(wp) == 1001 || LOWORD(wp) == IDOK) {
+                    HWND edit0 = GetDlgItem(hwnd, 100);
+                    HWND edit1 = GetDlgItem(hwnd, 101);
+                    HWND edit2 = GetDlgItem(hwnd, 102);
+                    GetWindowTextW(edit0, g_teamBufServer, 255);
+                    GetWindowTextW(edit1, g_teamBufRoom,   63);
+                    GetWindowTextW(edit2, g_teamBufName,   63);
+                    NetworkBridge::Config nc;
+                    nc.serverUrl = NetworkBridge::wideToUtf8_(g_teamBufServer);
+                    nc.room      = NetworkBridge::wideToUtf8_(g_teamBufRoom);
+                    nc.username  = NetworkBridge::wideToUtf8_(g_teamBufName);
+                    for (auto* s : {&nc.serverUrl, &nc.room, &nc.username})
+                        while (!s->empty() && (s->back()==' '||s->back()=='\t')) s->pop_back();
+                    if (nc.serverUrl.rfind("wss://",0)==0) nc.serverUrl.replace(0,6,"https://");
+                    if (nc.serverUrl.rfind("ws://",0)==0)  nc.serverUrl.replace(0,5,"http://");
+                    if (nc.serverUrl.empty() || nc.room.empty() || nc.username.empty()) {
+                        MessageBoxW(hwnd,
+                            L"请填全三项：服务器地址、房间号、昵称。\n\n"
+                            L"服务器地址形如：https://friend-kpm-xxxx.workers.dev",
+                            L"KuroCat 组队设置", MB_OK | MB_ICONWARNING);
+                        return 0;  // 不关窗口
+                    }
+        // 保存后：自动保存 + 自动连（用户下次点组队也能连）
+                    NetworkBridge::saveToIni("", nc);
+                    DestroyWindow(hwnd);
+                    // 只要配置完整，就连上！不管之前 teamEnabled 状态
+                    if (app) {
+                        app->net.disconnect();
+                        app->net.connect(nc);  // 用刚填好的配置直接连
+                        app->nextNetReportTime = nowSeconds();
+                        app->teamEnabled = true;
+                    }
+                    return 0;
+                }
+                if (LOWORD(wp) == IDCANCEL) {
+                    DestroyWindow(hwnd);
+                    return 0;
+                }
+                break;
+            }
+            case WM_CLOSE:
+                DestroyWindow(hwnd);
+                return 0;
+            case WM_DESTROY: {
+                if (app) app->teamSettingsDlg = nullptr;
+                return 0;
+            }
+        }
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
 
-        static bool s_registered = false;
-        if (!s_registered) {
+    static bool s_teamDlgClassRegistered = false;
+    auto showTeamSettingsDialog = [&app]() {
+        // 如果已经开着，就置顶 + 聚焦
+        if (app.teamSettingsDlg) {
+            ShowWindow(app.teamSettingsDlg, SW_RESTORE);
+            SetForegroundWindow(app.teamSettingsDlg);
+            SetFocus(GetDlgItem(app.teamSettingsDlg, 100));
+            return;
+        }
+
+        // 注册窗口类（第一次）
+        if (!s_teamDlgClassRegistered) {
             WNDCLASSEXW wc = { sizeof(wc) };
-            wc.lpfnWndProc   = DefDlgProcW;
+            wc.lpfnWndProc   = TeamSettingsWndProc;
             wc.hInstance     = (HINSTANCE)GetWindowLongPtrW(app.hwnd, GWLP_HINSTANCE);
             wc.lpszClassName = L"KuroCatTeamSettings";
             wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);  // 标准白色背景
             RegisterClassExW(&wc);
-            s_registered = true;
+            s_teamDlgClassRegistered = true;
         }
         HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(app.hwnd, GWLP_HINSTANCE);
 
+        // 准备初始值
+        auto netCfg = NetworkBridge::loadFromIni();
+        wcscpy_s(g_teamBufServer, utf8ToWide(netCfg.serverUrl).c_str());
+        wcscpy_s(g_teamBufRoom,   utf8ToWide(netCfg.room).c_str());
+        wcscpy_s(g_teamBufName,   utf8ToWide(netCfg.username).c_str());
+
+        // 主对话框窗口（WS_CHILD + WS_GROUP 让 IsDialogMessageW 能识别）
         HWND dlg = CreateWindowExW(0, L"KuroCatTeamSettings",
             L"\U0001F431 KuroCat 组队设置",
-            WS_POPUP | WS_CAPTION | WS_SYSMENU,
-            CW_USEDEFAULT, CW_USEDEFAULT, 460, 290,
-            app.menuOwnerHwnd, nullptr, hInst, nullptr);
+            WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_GROUP,
+            CW_USEDEFAULT, CW_USEDEFAULT, 460, 280,
+            app.menuOwnerHwnd, nullptr, hInst, (LPVOID)&app);  // LPARAM 传 AppState* 给 WM_CREATE
 
+        // 居中
         RECT rc; GetWindowRect(dlg, &rc);
         int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
         SetWindowPos(dlg, nullptr,
             (sw - (rc.right-rc.left))/2 - rc.left,
             (sh - (rc.bottom-rc.top))/2 - rc.top, 0, 0, SWP_NOSIZE|SWP_NOZORDER);
 
-        struct Row { int y; const wchar_t* label; wchar_t* val; };
+        // 3 个标签（WS_GROUP）+ 3 个编辑框（WS_TABSTOP）
+        struct Row { int y; const wchar_t* label; wchar_t* val; int editId; };
         Row rows[] = {
-            { 12, L"服务器地址:", s_bufServer },
-            { 56, L"房间号:",     s_bufRoom   },
-            {100, L"你的昵称:",   s_bufName   },
+            { 12, L"服务器地址:", g_teamBufServer, 100 },
+            { 56, L"房间号:",     g_teamBufRoom,   101 },
+            {100, L"你的昵称:",   g_teamBufName,   102 },
         };
-        HWND edits[3] = {};
         for (int i = 0; i < 3; i++) {
             CreateWindowExW(0, L"STATIC", rows[i].label,
-                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                WS_CHILD | WS_VISIBLE | WS_GROUP | SS_LEFT,
                 16, rows[i].y, 90, 20, dlg, nullptr, hInst, nullptr);
-            edits[i] = CreateWindowExW(0, L"EDIT", rows[i].val,
-                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                112, rows[i].y - 2, 320, 22, dlg, nullptr, hInst, nullptr);
+            CreateWindowExW(0, L"EDIT", rows[i].val,
+                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP,
+                112, rows[i].y - 2, 320, 22, dlg, (HMENU)rows[i].editId, hInst, nullptr);
         }
+        // 提示
         CreateWindowExW(0, L"STATIC",
             L"\U0001F4A1 免费后端: Cloudflare Worker (Dashboard 粘贴代码, 0$)",
             WS_CHILD | WS_VISIBLE | SS_LEFT,
-            16, 145, 420, 18, dlg, nullptr, hInst, nullptr);
+            16, 140, 420, 18, dlg, nullptr, hInst, nullptr);
+        // 保存 (ID 1001, BS_DEFPUSHBUTTON = Enter)
         CreateWindowExW(0, L"BUTTON", L"保存",
-            WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON, 175, 200, 110, 30,
-            dlg, (HMENU)1001, hInst, nullptr);
+            WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON|WS_TABSTOP,
+            175, 195, 110, 30, dlg, (HMENU)1001, hInst, nullptr);
+        // 取消 (IDCANCEL = Esc)
         CreateWindowExW(0, L"BUTTON", L"取消",
-            WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, 295, 200, 110, 30,
-            dlg, (HMENU)IDCANCEL, hInst, nullptr);
+            WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON|WS_TABSTOP,
+            295, 195, 110, 30, dlg, (HMENU)IDCANCEL, hInst, nullptr);
 
+        app.teamSettingsDlg = dlg;
         ShowWindow(dlg, SW_SHOW);
+        UpdateWindow(dlg);
         SetForegroundWindow(dlg);
-        SetFocus(edits[0]);
-
-        MSG msg = {};
-        bool done = false, saved = false;
-        while (!done) {
-            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-                if (msg.message == WM_QUIT) { PostQuitMessage((int)msg.wParam); DestroyWindow(dlg); return saved; }
-                // IsDialogMessageW 处理键盘导航 + 转发表单消息
-                if (IsDialogMessageW(dlg, &msg)) continue;
-                TranslateMessage(&msg); DispatchMessageW(&msg);
-
-                if (msg.hwnd == dlg && msg.message == WM_COMMAND) {
-                    if (LOWORD(msg.wParam) == 1001 || LOWORD(msg.wParam) == IDOK) {
-                        GetWindowTextW(edits[0], s_bufServer, 255);
-                        GetWindowTextW(edits[1], s_bufRoom,   63);
-                        GetWindowTextW(edits[2], s_bufName,   63);
-                        NetworkBridge::Config nc;
-                        nc.serverUrl = NetworkBridge::wideToUtf8_(s_bufServer);
-                        nc.room      = NetworkBridge::wideToUtf8_(s_bufRoom);
-                        nc.username  = NetworkBridge::wideToUtf8_(s_bufName);
-                        for (auto* s : {&nc.serverUrl, &nc.room, &nc.username})
-                            while (!s->empty() && (s->back()==' '||s->back()=='\t')) s->pop_back();
-                        if (nc.serverUrl.rfind("wss://",0)==0) nc.serverUrl.replace(0,6,"https://");
-                        if (nc.serverUrl.rfind("ws://",0)==0)  nc.serverUrl.replace(0,5,"http://");
-                        if (nc.serverUrl.empty() || nc.room.empty() || nc.username.empty()) {
-                            MessageBoxW(dlg,
-                                L"请填全三项：服务器地址、房间号、昵称。\n\n"
-                                L"服务器地址形如：https://friend-kpm-xxxx.workers.dev",
-                                L"KuroCat 组队设置", MB_OK | MB_ICONWARNING);
-                            continue;
-                        }
-                        NetworkBridge::saveToIni("", nc);
-                        saved = true; DestroyWindow(dlg); done = true;
-                    } else if (LOWORD(msg.wParam) == IDCANCEL) {
-                        DestroyWindow(dlg); done = true;
-                    }
-                }
-                if (msg.message == WM_CLOSE && msg.hwnd == dlg) { DestroyWindow(dlg); done = true; }
-            }
-            if (!done) Sleep(5);
-        }
-        return saved;
+        SetFocus(GetDlgItem(dlg, 100));
     };
 
     switch (cmd) {
@@ -1187,7 +1233,8 @@ void showContextMenu(AppState& app, POINT screenPt) {
                     app.net.connect(netCfg);
                     app.nextNetReportTime = nowSeconds();
                 } else {
-                    app.teamEnabled = false;  // 没配置 → 自动打开设置对话框
+                    // 没配置 → 弹对话框，保存后 WndProc 自动连 + 设 teamEnabled=true
+                    app.teamEnabled = false;
                     MessageBoxW(app.menuOwnerHwnd,
                         L"组队模式需要先配置服务器地址。\n\n"
                         L"下一个窗口会帮你填好——你只需要：\n"
@@ -1196,13 +1243,7 @@ void showContextMenu(AppState& app, POINT screenPt) {
                         L"  3. 填你的昵称\n\n"
                         L"后端怎么免费部署？对话框里有提示。",
                         L"\U0001F431 KuroCat 组队模式", MB_OK | MB_ICONINFORMATION);
-                    if (showTeamSettingsDialog()) {
-                        // 保存成功 → 自动开启
-                        auto fresh = NetworkBridge::loadFromIni();
-                        app.net.connect(fresh);
-                        app.nextNetReportTime = nowSeconds();
-                        app.teamEnabled = true;
-                    }
+                    showTeamSettingsDialog();
                 }
             } else {
                 app.net.disconnect();
@@ -1210,16 +1251,7 @@ void showContextMenu(AppState& app, POINT screenPt) {
             break;
         }
         case CMD_TEAM_OPEN_SETTINGS: {
-            bool saved = showTeamSettingsDialog();
-            // 如果已经开着组队，保存后自动重连
-            if (saved && app.teamEnabled) {
-                app.net.disconnect();
-                auto fresh = NetworkBridge::loadFromIni();
-                if (!fresh.serverUrl.empty() && !fresh.username.empty() && !fresh.room.empty()) {
-                    app.net.connect(fresh);
-                    app.nextNetReportTime = nowSeconds();
-                }
-            }
+            showTeamSettingsDialog();  // 非模态：开着就行，保存后 WndProc 自动处理
             break;
         }
         case CMD_QUIT:
@@ -1806,6 +1838,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                 exitCode = (int)msg.wParam;
                 break;
             }
+            // ── 组队设置对话框：让它能处理键盘导航 + Tab/Enter/Esc ──
+            if (g_app && g_app->teamSettingsDlg && IsDialogMessageW(g_app->teamSettingsDlg, &msg)) continue;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
             if (nowSeconds() > drainUntil) break;
