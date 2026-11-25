@@ -1052,7 +1052,7 @@ static bool showTeamSettingsDialog(LPARAM lParam /* AppState* */) {
     // 调用 DialogBoxIndirectParam —— 模态，直到 EndDialog 才返回
     INT_PTR result = DialogBoxIndirectParamW(
         (HINSTANCE)GetWindowLongPtrW(((AppState*)lParam)->hwnd, GWLP_HINSTANCE),
-        tpl,
+        (LPCDLGTEMPLATEW)tpl,  // 显式类型转换：DlgTplData* → LPCDLGTEMPLATEW
         ((AppState*)lParam)->menuOwnerHwnd,
         TeamSettingsDlgProc,
         lParam);
