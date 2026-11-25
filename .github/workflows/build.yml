@@ -6,13 +6,12 @@ on:
     paths:
       - 'windows/src/**'
       - 'windows/CMakeLists.txt'
-      - 'kpm_server.cpp'
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
 jobs:
   build-windows:
-    name: Build KuroCat + KpmServer (x64, Release)
+    name: Build KuroCat.exe (x64, Release)
     runs-on: windows-latest
 
     steps:
@@ -32,24 +31,18 @@ jobs:
         working-directory: windows
         run: cmake --build build
 
-      - name: Build KpmServer.exe
-        run: cl /EHsc /O2 /std:c++17 /Fe:KpmServer.exe kpm_server.cpp ws2_32.lib
-
       - name: Collect artifacts
-        id: collect
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "artifacts" | Out-Null
           $kurocat = Get-ChildItem -Path "windows\build" -Filter "KuroCat.exe" -Recurse | Select-Object -First 1
           if (-not $kurocat) { throw "KuroCat.exe not found!" }
           Copy-Item $kurocat.FullName "artifacts\KuroCat-Team.exe"
-          Copy-Item "KpmServer.exe" "artifacts\KpmServer.exe"
-          Write-Host "KuroCat: $($kurocat.FullName)"
-          Write-Host "KpmServer: KpmServer.exe"
+          Write-Host "Found KuroCat: $($kurocat.FullName) ($([math]::Round($kurocat.Length/1MB, 2)) MB)"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: KuroCat-Team-Windows-x64
-          path: artifacts/*
+          path: artifacts/KuroCat-Team.exe
           retention-days: 30
