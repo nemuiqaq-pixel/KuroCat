@@ -930,12 +930,20 @@ static LRESULT CALLBACK TeamSettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
 
 // 创建/显示组队设置对话框（非模态，主循环 IsDialogMessageW 帮忙派发）
 static void showTeamSettingsDialog_(AppState& app) {
+    // ── 强制清理任何残留的旧窗口 ──
+    // (IsDialogMessageW 可能吞掉了 WM_DESTROY 导致 teamSettingsDlg 没被清掉)
     if (app.teamSettingsDlg) {
-        ShowWindow(app.teamSettingsDlg, SW_RESTORE);
-        SetForegroundWindow(app.teamSettingsDlg);
-        SetFocus(GetDlgItem(app.teamSettingsDlg, 100));
-        return;
+        if (IsWindow(app.teamSettingsDlg)) {
+            // 先礼貌请求关闭
+            PostMessageW(app.teamSettingsDlg, WM_CLOSE, 0, 0);
+            Sleep(50);
+            if (IsWindow(app.teamSettingsDlg)) {
+                DestroyWindow(app.teamSettingsDlg);
+            }
+        }
+        app.teamSettingsDlg = nullptr;
     }
+
     if (!g_teamDlgClassRegistered) {
         WNDCLASSEXW wc = { sizeof(wc) };
         wc.lpfnWndProc   = TeamSettingsWndProc;
@@ -1810,8 +1818,18 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                 break;
             }
             // ── 组队设置对话框：让它能处理键盘导航 + Tab/Enter/Esc ──
-            if (g_app && g_app->teamSettingsDlg && IsWindow(g_app->teamSettingsDlg)
-                && IsDialogMessageW(g_app->teamSettingsDlg, &msg)) continue;
+            // 只在键盘消息时调 IsDialogMessageW，避免吞掉 WM_CLOSE/WM_DESTROY/WM_COMMAND
+            if (g_app && g_app->teamSettingsDlg && IsWindow(g_app->teamSettingsDlg)) {
+                switch (msg.message) {
+                    case WM_KEYDOWN: case WM_SYSKEYDOWN:
+                    case WM_CHAR:    case WM_SYSCHAR:
+                    case WM_IME_STARTCOMPOSITION:
+                    case WM_IME_COMPOSITION:
+                    case WM_IME_ENDCOMPOSITION:
+                        if (IsDialogMessageW(g_app->teamSettingsDlg, &msg)) continue;
+                        break;
+                }
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
             if (nowSeconds() > drainUntil) break;
