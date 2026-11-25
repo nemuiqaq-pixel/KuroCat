@@ -1,18 +1,18 @@
 name: Build KuroCat with Team Mode
 
-# 触发：推送到 main/master 分支 或 手动触发
 on:
   push:
     branches: [main, master]
     paths:
       - 'windows/src/**'
       - 'windows/CMakeLists.txt'
+      - 'kpm_server.cpp'
       - '.github/workflows/build.yml'
-  workflow_dispatch:  # 支持手动点按钮触发
+  workflow_dispatch:
 
 jobs:
   build-windows:
-    name: Build KuroCat.exe (x64, Release)
+    name: Build KuroCat + KpmServer (x64, Release)
     runs-on: windows-latest
 
     steps:
@@ -28,36 +28,28 @@ jobs:
         working-directory: windows
         run: cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build
+      - name: Build KuroCat.exe
         working-directory: windows
         run: cmake --build build
+
+      - name: Build KpmServer.exe
+        run: cl /EHsc /O2 /std:c++17 /Fe:KpmServer.exe kpm_server.cpp ws2_32.lib
 
       - name: Collect artifacts
         id: collect
         shell: pwsh
         run: |
-          $exe = Get-ChildItem -Path "windows\build" -Filter "KuroCat.exe" -Recurse | Select-Object -First 1
-          if (-not $exe) { throw "KuroCat.exe not found!" }
-          Write-Host "Found: $($exe.FullName) ($([math]::Round($exe.Length/1MB, 2)) MB)"
           New-Item -ItemType Directory -Force -Path "artifacts" | Out-Null
-          Copy-Item $exe.FullName "artifacts\KuroCat-Team.exe"
-          $size = [math]::Round($exe.Length/1MB, 2)
-          Write-Host "exe_size=$size" >> $GITHUB_OUTPUT
+          $kurocat = Get-ChildItem -Path "windows\build" -Filter "KuroCat.exe" -Recurse | Select-Object -First 1
+          if (-not $kurocat) { throw "KuroCat.exe not found!" }
+          Copy-Item $kurocat.FullName "artifacts\KuroCat-Team.exe"
+          Copy-Item "KpmServer.exe" "artifacts\KpmServer.exe"
+          Write-Host "KuroCat: $($kurocat.FullName)"
+          Write-Host "KpmServer: KpmServer.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: KuroCat-Team-Windows-x64
-          path: artifacts/KuroCat-Team.exe
+          path: artifacts/*
           retention-days: 30
-
-      - name: Create GitHub Release (git tag)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/KuroCat-Team.exe
-          body: |
-            ## KuroCat with Team Mode — ${{ github.ref_name }}
-            - 保留全部原版功能
-            - 新增「组队模式」：托盘右键菜单开启
-            - `KuroCat.exe --server=wss://... --room=office --name=张三`
