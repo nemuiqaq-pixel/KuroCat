@@ -1810,7 +1810,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                 break;
             }
             // ── 组队设置对话框：让它能处理键盘导航 + Tab/Enter/Esc ──
-            if (g_app && g_app->teamSettingsDlg && IsDialogMessageW(g_app->teamSettingsDlg, &msg)) continue;
+            if (g_app && g_app->teamSettingsDlg && IsWindow(g_app->teamSettingsDlg)
+                && IsDialogMessageW(g_app->teamSettingsDlg, &msg)) continue;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
             if (nowSeconds() > drainUntil) break;
